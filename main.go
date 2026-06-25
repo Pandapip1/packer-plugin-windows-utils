@@ -1,0 +1,20 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/hashicorp/packer-plugin-sdk/plugin"
+
+	"github.com/Pandapip1/packer-plugin-windows-utils/version"
+)
+
+func main() {
+	pps := plugin.NewSet()
+	pps.SetVersion(version.PluginVersion)
+	err := pps.Run()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
