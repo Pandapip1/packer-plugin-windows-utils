@@ -2,7 +2,11 @@ module github.com/Pandapip1/packer-plugin-windows-utils
 
 go 1.26.4
 
-require github.com/hashicorp/packer-plugin-sdk v0.6.9
+require (
+	github.com/hashicorp/hcl/v2 v2.24.0
+	github.com/hashicorp/packer-plugin-sdk v0.6.9
+	github.com/zclconf/go-cty v1.16.3
+)
 
 require (
 	github.com/agext/levenshtein v1.2.3 // indirect
@@ -44,7 +48,6 @@ require (
 	github.com/hashicorp/go-version v1.6.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/hashicorp/hcl/v2 v2.24.0 // indirect
 	github.com/hashicorp/serf v0.10.1 // indirect
 	github.com/hashicorp/vault/api v1.14.0 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
@@ -63,7 +66,6 @@ require (
 	github.com/ulikunitz/xz v0.5.10 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.3.5 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
-	github.com/zclconf/go-cty v1.16.3 // indirect
 	golang.org/x/exp v0.0.0-20230321023759-10a507213a29 // indirect
 	golang.org/x/mod v0.30.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
