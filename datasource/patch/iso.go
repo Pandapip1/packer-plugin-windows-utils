@@ -1,4 +1,4 @@
-package patch_noprompt
+package patch
 
 import (
 	"crypto/md5"
@@ -452,30 +452,56 @@ func copyFileContents(src, dst string) error {
 	return err
 }
 
-// patchISO copies srcPath to a temp file and replaces the EFI boot images
-// (efisys.bin and cdboot.efi) with their no-prompt variants from within the ISO.
-// It returns the path to the patched copy.
-func patchISO(srcPath string) (string, error) {
+// patchISO copies srcPath to a temp file, optionally applying the enabled
+// patch steps to the copy. It returns the path to the copy.
+func patchISO(srcPath string, patchNoBoot bool) (string, error) {
+	dstFile, err := os.CreateTemp("", "patched-*.iso")
+	if err != nil {
+		return "", fmt.Errorf("creating temp ISO: %w", err)
+	}
+	dstPath := dstFile.Name()
+	dstFile.Close()
+
+	log.Printf("  Copying ISO to %s ...", dstPath)
+	if err := copyFileContents(srcPath, dstPath); err != nil {
+		os.Remove(dstPath)
+		return "", fmt.Errorf("copying ISO: %w", err)
+	}
+
+	if patchNoBoot {
+		if err := patchNoBootPrompt(srcPath, dstPath); err != nil {
+			os.Remove(dstPath)
+			return "", err
+		}
+	}
+
+	log.Printf("  Done — patched ISO ready.")
+	return dstPath, nil
+}
+
+// patchNoBootPrompt replaces the EFI boot images (efisys.bin and cdboot.efi)
+// in dstPath with their no-prompt variants found within srcPath.
+func patchNoBootPrompt(srcPath, dstPath string) error {
 	efiLBA, err := eltoritoEFILBA(srcPath)
 	if err != nil {
-		return "", err
+		return err
 	}
 	log.Printf("  EFI boot image at LBA %d (offset %#x)", efiLBA, int64(efiLBA)*scanStep)
 
 	f, err := os.Open(srcPath)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer f.Close()
 
 	orig := make([]byte, 1474560)
 	if _, err := f.ReadAt(orig, int64(efiLBA)*scanStep); err != nil && err != io.EOF {
-		return "", fmt.Errorf("reading EFI boot image: %w", err)
+		return fmt.Errorf("reading EFI boot image: %w", err)
 	}
 
 	efisysSize := fatImageSize(orig)
 	if efisysSize == 0 {
-		return "", fmt.Errorf("EFI image is not a FAT12 filesystem")
+		return fmt.Errorf("EFI image is not a FAT12 filesystem")
 	}
 	log.Printf("  efisys.bin size: %d bytes", efisysSize)
 
@@ -484,7 +510,7 @@ func patchISO(srcPath string) (string, error) {
 
 	fi, err := f.Stat()
 	if err != nil {
-		return "", err
+		return err
 	}
 	isoSize := fi.Size()
 
@@ -516,38 +542,25 @@ func patchISO(srcPath string) (string, error) {
 		}
 	}
 	if nopromptData == nil {
-		return "", fmt.Errorf("efisys_noprompt.bin not found in ISO")
+		return fmt.Errorf("efisys_noprompt.bin not found in ISO")
 	}
 
 	cdbootNP := isoFindFile(f, "EFI/MICROSOFT/BOOT/CDBOOT_NOPROMPT.EFI")
 	cdboot := isoFindFile(f, "EFI/MICROSOFT/BOOT/CDBOOT.EFI")
 
 	if cdbootNP == nil {
-		return "", fmt.Errorf("cdboot_noprompt.efi not found in ISO")
+		return fmt.Errorf("cdboot_noprompt.efi not found in ISO")
 	}
 	log.Printf("  cdboot_noprompt.efi at LBA %d, size %d", cdbootNP.lba, cdbootNP.size)
 
 	cdbootNPData := make([]byte, cdbootNP.size)
 	if _, err := f.ReadAt(cdbootNPData, int64(cdbootNP.lba)*scanStep); err != nil {
-		return "", fmt.Errorf("reading cdboot_noprompt.efi: %w", err)
-	}
-
-	dstFile, err := os.CreateTemp("", "patched-*.iso")
-	if err != nil {
-		return "", fmt.Errorf("creating temp ISO: %w", err)
-	}
-	dstPath := dstFile.Name()
-	dstFile.Close()
-
-	log.Printf("  Copying ISO to %s ...", dstPath)
-	if err := copyFileContents(srcPath, dstPath); err != nil {
-		os.Remove(dstPath)
-		return "", fmt.Errorf("copying ISO: %w", err)
+		return fmt.Errorf("reading cdboot_noprompt.efi: %w", err)
 	}
 
 	out, err := os.OpenFile(dstPath, os.O_RDWR, 0)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer out.Close()
 
@@ -558,6 +571,5 @@ func patchISO(srcPath string) (string, error) {
 		log.Printf("  WARNING: cdboot.efi not found in ISO")
 	}
 
-	log.Printf("  Done — patched ISO ready.")
-	return dstPath, nil
+	return nil
 }

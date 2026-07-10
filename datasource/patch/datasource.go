@@ -1,4 +1,4 @@
-package patch_noprompt
+package patch
 
 import (
 	"fmt"
@@ -8,12 +8,14 @@ import (
 )
 
 type Datasource struct {
-	isoPath string
+	isoPath     string
+	patchNoBoot bool
 }
 
 func (d *Datasource) ConfigSpec() hcldec.ObjectSpec {
 	return hcldec.ObjectSpec{
-		"iso_path": &hcldec.AttrSpec{Name: "iso_path", Type: cty.String, Required: true},
+		"iso_path":     &hcldec.AttrSpec{Name: "iso_path", Type: cty.String, Required: true},
+		"patch_noboot": &hcldec.AttrSpec{Name: "patch_noboot", Type: cty.Bool, Required: false},
 	}
 }
 
@@ -24,6 +26,7 @@ func (d *Datasource) OutputSpec() hcldec.ObjectSpec {
 }
 
 func (d *Datasource) Configure(configs ...interface{}) error {
+	d.patchNoBoot = true
 	for _, raw := range configs {
 		cval, ok := raw.(cty.Value)
 		if !ok || cval.IsNull() || !cval.IsKnown() {
@@ -31,6 +34,9 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 		}
 		if v := cval.GetAttr("iso_path"); v.IsKnown() && !v.IsNull() {
 			d.isoPath = v.AsString()
+		}
+		if v := cval.GetAttr("patch_noboot"); v.IsKnown() && !v.IsNull() {
+			d.patchNoBoot = v.True()
 		}
 	}
 	if d.isoPath == "" {
@@ -40,7 +46,7 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 }
 
 func (d *Datasource) Execute() (cty.Value, error) {
-	path, err := patchISO(d.isoPath)
+	path, err := patchISO(d.isoPath, d.patchNoBoot)
 	if err != nil {
 		return cty.NilVal, err
 	}
