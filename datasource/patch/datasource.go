@@ -8,14 +8,16 @@ import (
 )
 
 type Datasource struct {
-	isoPath     string
-	patchNoBoot bool
+	isoPath      string
+	patchNoBoot  bool
+	extraDrivers []string
 }
 
 func (d *Datasource) ConfigSpec() hcldec.ObjectSpec {
 	return hcldec.ObjectSpec{
-		"iso_path":     &hcldec.AttrSpec{Name: "iso_path", Type: cty.String, Required: true},
-		"patch_noboot": &hcldec.AttrSpec{Name: "patch_noboot", Type: cty.Bool, Required: false},
+		"iso_path":      &hcldec.AttrSpec{Name: "iso_path", Type: cty.String, Required: true},
+		"patch_noboot":  &hcldec.AttrSpec{Name: "patch_noboot", Type: cty.Bool, Required: false},
+		"extra_drivers": &hcldec.AttrSpec{Name: "extra_drivers", Type: cty.List(cty.String), Required: false},
 	}
 }
 
@@ -38,6 +40,14 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 		if v := cval.GetAttr("patch_noboot"); v.IsKnown() && !v.IsNull() {
 			d.patchNoBoot = v.True()
 		}
+		if v := cval.GetAttr("extra_drivers"); v.IsKnown() && !v.IsNull() {
+			d.extraDrivers = nil
+			for _, ev := range v.AsValueSlice() {
+				if ev.IsKnown() && !ev.IsNull() {
+					d.extraDrivers = append(d.extraDrivers, ev.AsString())
+				}
+			}
+		}
 	}
 	if d.isoPath == "" {
 		return fmt.Errorf("iso_path is required")
@@ -46,7 +56,7 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 }
 
 func (d *Datasource) Execute() (cty.Value, error) {
-	path, err := patchISO(d.isoPath, d.patchNoBoot)
+	path, err := patchISO(d.isoPath, d.patchNoBoot, d.extraDrivers)
 	if err != nil {
 		return cty.NilVal, err
 	}

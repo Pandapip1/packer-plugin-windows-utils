@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf16"
 )
@@ -370,18 +371,16 @@ func isoWalkDir(f *os.File, dirLBA uint32, dirSize int, parts []string, joliet b
 	return nil
 }
 
-// isoFindFile returns the extent for path, trying UDF then Joliet then ISO 9660.
-func isoFindFile(f *os.File, path string) *fileExtent {
-	if r := udfFindFile(f, path); r != nil {
-		return r
-	}
+// isoRoot describes the location of a root directory found in a primary or
+// supplementary (Joliet) volume descriptor.
+type isoRoot struct {
+	lba  uint32
+	size int
+}
 
-	type root struct {
-		lba  uint32
-		size int
-	}
-	var jolietRoot, primaryRoot *root
-
+// isoRoots scans the volume descriptors for the ISO 9660 primary root and,
+// if present, the Joliet supplementary root.
+func isoRoots(f *os.File) (primary, joliet *isoRoot) {
 	vd := make([]byte, scanStep)
 	for sector := 16; sector < 32; sector++ {
 		if _, err := f.ReadAt(vd, int64(sector)*scanStep); err != nil {
@@ -392,15 +391,25 @@ func isoFindFile(f *os.File, path string) *fileExtent {
 		}
 		lba := binary.LittleEndian.Uint32(vd[156+2:])
 		size := int(binary.LittleEndian.Uint32(vd[156+10:]))
-		if vd[0] == 1 && primaryRoot == nil {
-			primaryRoot = &root{lba: lba, size: size}
+		if vd[0] == 1 && primary == nil {
+			primary = &isoRoot{lba: lba, size: size}
 		} else if vd[0] == 2 {
 			esc := string(vd[88:91])
 			if esc == "%/@" || esc == "%/C" || esc == "%/E" {
-				jolietRoot = &root{lba: lba, size: size}
+				joliet = &isoRoot{lba: lba, size: size}
 			}
 		}
 	}
+	return primary, joliet
+}
+
+// isoFindFile returns the extent for path, trying UDF then Joliet then ISO 9660.
+func isoFindFile(f *os.File, path string) *fileExtent {
+	if r := udfFindFile(f, path); r != nil {
+		return r
+	}
+
+	primaryRoot, jolietRoot := isoRoots(f)
 
 	var parts []string
 	for _, p := range strings.Split(path, "/") {
@@ -418,6 +427,98 @@ func isoFindFile(f *os.File, path string) *fileExtent {
 		return isoWalkDir(f, primaryRoot.lba, primaryRoot.size, parts, false)
 	}
 	return nil
+}
+
+// isoExtractAll extracts every file from the ISO's Joliet tree (falling back
+// to the plain ISO 9660 tree if no Joliet volume descriptor is present) into
+// destDir, preserving directory structure.
+func isoExtractAll(srcPath, destDir string) error {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	primaryRoot, jolietRoot := isoRoots(f)
+	if jolietRoot != nil {
+		return isoExtractDir(f, jolietRoot.lba, jolietRoot.size, true, destDir)
+	}
+	if primaryRoot != nil {
+		return isoExtractDir(f, primaryRoot.lba, primaryRoot.size, false, destDir)
+	}
+	return fmt.Errorf("no ISO 9660 root directory found")
+}
+
+// isoExtractDir recursively extracts the directory at dirLBA into destDir.
+func isoExtractDir(f *os.File, dirLBA uint32, dirSize int, joliet bool, destDir string) error {
+	data := make([]byte, dirSize)
+	if _, err := f.ReadAt(data, int64(dirLBA)*scanStep); err != nil {
+		return err
+	}
+	pos := 0
+	for pos < len(data) {
+		recLen := int(data[pos])
+		if recLen == 0 {
+			pos = (pos/scanStep + 1) * scanStep
+			if pos >= len(data) {
+				break
+			}
+			continue
+		}
+		fileLBA := binary.LittleEndian.Uint32(data[pos+2:])
+		fileSize := binary.LittleEndian.Uint32(data[pos+10:])
+		flags := data[pos+25]
+		nameLen := int(data[pos+32])
+		if pos+33+nameLen > len(data) {
+			break
+		}
+		raw := data[pos+33 : pos+33+nameLen]
+		isDir := flags&0x02 != 0
+
+		if nameLen == 1 && (raw[0] == 0x00 || raw[0] == 0x01) {
+			pos += recLen
+			continue
+		}
+
+		var name string
+		if joliet {
+			name = utf16BEDecode(raw)
+		} else {
+			name = string(raw)
+		}
+		if !isDir {
+			if idx := strings.Index(name, ";"); idx >= 0 {
+				name = name[:idx]
+			}
+		}
+
+		outPath := filepath.Join(destDir, name)
+		if isDir {
+			if err := os.MkdirAll(outPath, 0o755); err != nil {
+				return err
+			}
+			if err := isoExtractDir(f, fileLBA, int(fileSize), joliet, outPath); err != nil {
+				return err
+			}
+		} else if err := isoExtractFile(f, fileLBA, fileSize, outPath); err != nil {
+			return err
+		}
+		pos += recLen
+	}
+	return nil
+}
+
+func isoExtractFile(f *os.File, lba uint32, size uint32, outPath string) error {
+	out, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if size == 0 {
+		return nil
+	}
+	_, err = io.CopyN(out, io.NewSectionReader(f, int64(lba)*scanStep, int64(size)), int64(size))
+	return err
 }
 
 // patchEFI writes data (padded with zeros to the next sector boundary) at
@@ -454,7 +555,16 @@ func copyFileContents(src, dst string) error {
 
 // patchISO copies srcPath to a temp file, optionally applying the enabled
 // patch steps to the copy. It returns the path to the copy.
-func patchISO(srcPath string, patchNoBoot bool) (string, error) {
+//
+// If extraDrivers is non-empty, patching instead goes through a full
+// extract/modify/repack pipeline (see patchISORebuild), since injected
+// drivers change the size of boot.wim/install.wim beyond what fits back into
+// the ISO's original fixed sector layout.
+func patchISO(srcPath string, patchNoBoot bool, extraDrivers []string) (string, error) {
+	if len(extraDrivers) > 0 {
+		return patchISORebuild(srcPath, patchNoBoot, extraDrivers)
+	}
+
 	dstFile, err := os.CreateTemp("", "patched-*.iso")
 	if err != nil {
 		return "", fmt.Errorf("creating temp ISO: %w", err)
@@ -479,29 +589,39 @@ func patchISO(srcPath string, patchNoBoot bool) (string, error) {
 	return dstPath, nil
 }
 
-// patchNoBootPrompt replaces the EFI boot images (efisys.bin and cdboot.efi)
-// in dstPath with their no-prompt variants found within srcPath.
-func patchNoBootPrompt(srcPath, dstPath string) error {
+// noBootPromptData holds the no-prompt EFI boot image replacements located
+// within an ISO by findNoBootPromptData.
+type noBootPromptData struct {
+	efiLBA       uint32
+	efisysSize   int
+	nopromptData []byte
+	cdboot       *fileExtent
+	cdbootNPData []byte
+}
+
+// findNoBootPromptData locates the no-prompt efisys.bin and cdboot.efi
+// replacement data within srcPath.
+func findNoBootPromptData(srcPath string) (*noBootPromptData, error) {
 	efiLBA, err := eltoritoEFILBA(srcPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	log.Printf("  EFI boot image at LBA %d (offset %#x)", efiLBA, int64(efiLBA)*scanStep)
 
 	f, err := os.Open(srcPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 
 	orig := make([]byte, 1474560)
 	if _, err := f.ReadAt(orig, int64(efiLBA)*scanStep); err != nil && err != io.EOF {
-		return fmt.Errorf("reading EFI boot image: %w", err)
+		return nil, fmt.Errorf("reading EFI boot image: %w", err)
 	}
 
 	efisysSize := fatImageSize(orig)
 	if efisysSize == 0 {
-		return fmt.Errorf("EFI image is not a FAT12 filesystem")
+		return nil, fmt.Errorf("EFI image is not a FAT12 filesystem")
 	}
 	log.Printf("  efisys.bin size: %d bytes", efisysSize)
 
@@ -510,7 +630,7 @@ func patchNoBootPrompt(srcPath, dstPath string) error {
 
 	fi, err := f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	isoSize := fi.Size()
 
@@ -542,20 +662,37 @@ func patchNoBootPrompt(srcPath, dstPath string) error {
 		}
 	}
 	if nopromptData == nil {
-		return fmt.Errorf("efisys_noprompt.bin not found in ISO")
+		return nil, fmt.Errorf("efisys_noprompt.bin not found in ISO")
 	}
 
 	cdbootNP := isoFindFile(f, "EFI/MICROSOFT/BOOT/CDBOOT_NOPROMPT.EFI")
 	cdboot := isoFindFile(f, "EFI/MICROSOFT/BOOT/CDBOOT.EFI")
 
 	if cdbootNP == nil {
-		return fmt.Errorf("cdboot_noprompt.efi not found in ISO")
+		return nil, fmt.Errorf("cdboot_noprompt.efi not found in ISO")
 	}
 	log.Printf("  cdboot_noprompt.efi at LBA %d, size %d", cdbootNP.lba, cdbootNP.size)
 
 	cdbootNPData := make([]byte, cdbootNP.size)
 	if _, err := f.ReadAt(cdbootNPData, int64(cdbootNP.lba)*scanStep); err != nil {
-		return fmt.Errorf("reading cdboot_noprompt.efi: %w", err)
+		return nil, fmt.Errorf("reading cdboot_noprompt.efi: %w", err)
+	}
+
+	return &noBootPromptData{
+		efiLBA:       efiLBA,
+		efisysSize:   efisysSize,
+		nopromptData: nopromptData,
+		cdboot:       cdboot,
+		cdbootNPData: cdbootNPData,
+	}, nil
+}
+
+// patchNoBootPrompt replaces the EFI boot images (efisys.bin and cdboot.efi)
+// in dstPath with their no-prompt variants found within srcPath.
+func patchNoBootPrompt(srcPath, dstPath string) error {
+	d, err := findNoBootPromptData(srcPath)
+	if err != nil {
+		return err
 	}
 
 	out, err := os.OpenFile(dstPath, os.O_RDWR, 0)
@@ -564,9 +701,42 @@ func patchNoBootPrompt(srcPath, dstPath string) error {
 	}
 	defer out.Close()
 
-	patchEFI(out, "efisys.bin", efiLBA, uint64(efisysSize), nopromptData)
-	if cdboot != nil {
-		patchEFI(out, "cdboot.efi", cdboot.lba, cdboot.size, cdbootNPData)
+	patchEFI(out, "efisys.bin", d.efiLBA, uint64(d.efisysSize), d.nopromptData)
+	if d.cdboot != nil {
+		patchEFI(out, "cdboot.efi", d.cdboot.lba, d.cdboot.size, d.cdbootNPData)
+	} else {
+		log.Printf("  WARNING: cdboot.efi not found in ISO")
+	}
+
+	return nil
+}
+
+// patchNoBootPromptDir replaces the extracted efisys.bin and cdboot.efi files
+// under mediaDir with their no-prompt variants found within srcPath.
+func patchNoBootPromptDir(srcPath, mediaDir string) error {
+	d, err := findNoBootPromptData(srcPath)
+	if err != nil {
+		return err
+	}
+
+	efisysPath, err := findByBasename(mediaDir, "efisys.bin")
+	if err != nil {
+		return fmt.Errorf("locating extracted efisys.bin: %w", err)
+	}
+	if err := os.WriteFile(efisysPath, d.nopromptData, 0o644); err != nil {
+		return fmt.Errorf("writing efisys.bin: %w", err)
+	}
+	log.Printf("  efisys.bin replaced with no-prompt variant")
+
+	if d.cdboot != nil {
+		cdbootPath, err := findByBasename(mediaDir, "cdboot.efi")
+		if err != nil {
+			return fmt.Errorf("locating extracted cdboot.efi: %w", err)
+		}
+		if err := os.WriteFile(cdbootPath, d.cdbootNPData, 0o644); err != nil {
+			return fmt.Errorf("writing cdboot.efi: %w", err)
+		}
+		log.Printf("  cdboot.efi replaced with no-prompt variant")
 	} else {
 		log.Printf("  WARNING: cdboot.efi not found in ISO")
 	}
