@@ -21,8 +21,8 @@ type cacheEntry struct {
 // which SKU is resolved. CacheTTL itself is deliberately excluded so that
 // changing it doesn't fragment the cache.
 func cacheKey(cfg Config) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%s|%s|%s",
-		cfg.Version, cfg.Release, cfg.Edition, cfg.Language, cfg.Arch, cfg.Locale)))
+	h := sha256.Sum256(fmt.Appendf(nil, "%s|%s|%s|%s|%s|%s",
+		cfg.Version, cfg.Release, cfg.Edition, cfg.Language, cfg.Arch, cfg.Locale))
 	return hex.EncodeToString(h[:])
 }
 
