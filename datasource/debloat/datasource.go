@@ -7,21 +7,19 @@
 // rights) -- and then optionally bakes in caller-supplied registry tweaks
 // (registry_tweaks) before authoring the final bootable ISO.
 //
-// nano11-go's entire removal/authoring pipeline lives in its own `package
-// main` (no non-main packages were split out for library reuse), so rather
-// than fork/refactor that upstream repo this datasource shells out to a
-// built nano11-go binary for the debloat and ISO-authoring stages (see
-// nano11go.go). The one piece of the pipeline that genuinely is
-// cleanly-separable library code is the registry hive read/modify/write
-// step, which lives in gowim's regf/registry/wim packages -- those ARE
-// consumed directly as Go module dependencies (see go.mod's replace
-// directives) so registry_tweaks can be applied with no subprocess and no
-// nano11-go-specific plumbing (see regtweaks.go).
+// nano11-go's removal/authoring pipeline lives in its own importable
+// `nano11go` package (github.com/Pandapip1/nano11-go), so this datasource
+// calls directly into nano11go.Debloat/BuildISO (see nano11go.go) rather
+// than shelling out to a separately-built binary. The one piece of the
+// pipeline that lives elsewhere -- and stays that way, since it needs no
+// nano11-go involvement at all -- is the registry hive read/modify/write
+// step for caller-supplied registry_tweaks, which is applied directly via
+// gowim's regf/registry/wim packages (see go.mod's replace directives and
+// regtweaks.go).
 package debloat
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
@@ -88,7 +86,6 @@ type nano11Flags struct {
 
 type Datasource struct {
 	isoPath        string
-	nano11goBinary string
 	imageIndex     int
 	lzxPreset      string
 	isoVolumeID    string
@@ -98,11 +95,10 @@ type Datasource struct {
 
 func (d *Datasource) ConfigSpec() hcldec.ObjectSpec {
 	return hcldec.ObjectSpec{
-		"iso_path":        &hcldec.AttrSpec{Name: "iso_path", Type: cty.String, Required: true},
-		"nano11go_binary": &hcldec.AttrSpec{Name: "nano11go_binary", Type: cty.String, Required: false},
-		"image_index":     &hcldec.AttrSpec{Name: "image_index", Type: cty.Number, Required: false},
-		"lzx_preset":      &hcldec.AttrSpec{Name: "lzx_preset", Type: cty.String, Required: false},
-		"iso_volume_id":   &hcldec.AttrSpec{Name: "iso_volume_id", Type: cty.String, Required: false},
+		"iso_path":      &hcldec.AttrSpec{Name: "iso_path", Type: cty.String, Required: true},
+		"image_index":   &hcldec.AttrSpec{Name: "image_index", Type: cty.Number, Required: false},
+		"lzx_preset":    &hcldec.AttrSpec{Name: "lzx_preset", Type: cty.String, Required: false},
+		"iso_volume_id": &hcldec.AttrSpec{Name: "iso_volume_id", Type: cty.String, Required: false},
 
 		"skip_appx":             &hcldec.AttrSpec{Name: "skip_appx", Type: cty.Bool, Required: false},
 		"skip_packages":         &hcldec.AttrSpec{Name: "skip_packages", Type: cty.Bool, Required: false},
@@ -137,7 +133,6 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 	// nano11Flags' doc comment): all stage-skip/opt-in flags false, image 1
 	// (the common single-edition case), the "fast" LZX preset, and
 	// nano11-go's own default ISO volume label.
-	d.nano11goBinary = "nano11-go"
 	d.imageIndex = 1
 	d.lzxPreset = "fast"
 	d.isoVolumeID = "Nano11Go"
@@ -162,9 +157,8 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 		"skip_iso_autounattend": &d.flags.skipISOAutounattend,
 	}
 	stringFields := map[string]*string{
-		"nano11go_binary": &d.nano11goBinary,
-		"lzx_preset":      &d.lzxPreset,
-		"iso_volume_id":   &d.isoVolumeID,
+		"lzx_preset":    &d.lzxPreset,
+		"iso_volume_id": &d.isoVolumeID,
 	}
 
 	for _, raw := range configs {
@@ -212,8 +206,8 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 			return err
 		}
 	}
-	if _, err := exec.LookPath(d.nano11goBinary); err != nil {
-		return fmt.Errorf("nano11go_binary %q not found: %w (build/install nano11-go and put it on PATH, or set nano11go_binary to its path)", d.nano11goBinary, err)
+	if _, err := lzxPresetOptions(d.lzxPreset); err != nil {
+		return err
 	}
 
 	return nil
