@@ -3,6 +3,7 @@ module github.com/Pandapip1/packer-plugin-windows-utils
 go 1.26.4
 
 require (
+	github.com/Pandapip1/nano11-go v0.0.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/hashicorp/packer-plugin-sdk v0.6.9
@@ -10,8 +11,13 @@ require (
 )
 
 require (
+	github.com/Pandapip1/gowim/appx v0.0.0 // indirect
+	github.com/Pandapip1/gowim/component v0.0.0 // indirect
+	github.com/Pandapip1/gowim/iso v0.0.0 // indirect
 	github.com/Pandapip1/gowim/lzms v0.0.0 // indirect
 	github.com/Pandapip1/gowim/lzx v0.0.0
+	github.com/Pandapip1/gowim/mum v0.0.0 // indirect
+	github.com/Pandapip1/gowim/pa30 v0.0.0 // indirect
 	github.com/Pandapip1/gowim/regf v0.0.0
 	github.com/Pandapip1/gowim/registry v0.0.0
 	github.com/Pandapip1/gowim/service v0.0.0 // indirect
@@ -86,6 +92,16 @@ require (
 
 replace github.com/zclconf/go-cty => github.com/nywilken/go-cty v1.13.3 // added by packer-sdc fix as noted in github.com/hashicorp/packer-plugin-sdk/issues/187
 
+replace github.com/Pandapip1/gowim/appx => ../gowim/appx
+
+replace github.com/Pandapip1/gowim/component => ../gowim/component
+
+replace github.com/Pandapip1/gowim/iso => ../gowim/iso
+
+replace github.com/Pandapip1/gowim/mum => ../gowim/mum
+
+replace github.com/Pandapip1/gowim/pa30 => ../gowim/pa30
+
 replace github.com/Pandapip1/gowim/regf => ../gowim/regf
 
 replace github.com/Pandapip1/gowim/registry => ../gowim/registry
@@ -99,3 +115,5 @@ replace github.com/Pandapip1/gowim/service => ../gowim/service
 replace github.com/Pandapip1/gowim/lzms => ../gowim/lzms
 
 replace github.com/Pandapip1/gowim/xpress => ../gowim/xpress
+
+replace github.com/Pandapip1/nano11-go => ../nano11-go
