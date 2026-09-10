@@ -429,6 +429,16 @@ func isoFindFile(f *os.File, path string) *fileExtent {
 	return nil
 }
 
+// ExtractISO extracts every file from srcPath's Joliet tree (falling back to
+// the plain ISO 9660 tree if no Joliet volume descriptor is present) into
+// destDir, preserving directory structure. It is exported so other
+// datasources in this module (e.g. debloat) that need a full extracted copy
+// of a source ISO's media can reuse this package's dependency-free ISO
+// reader instead of shelling out to an external tool.
+func ExtractISO(srcPath, destDir string) error {
+	return isoExtractAll(srcPath, destDir)
+}
+
 // isoExtractAll extracts every file from the ISO's Joliet tree (falling back
 // to the plain ISO 9660 tree if no Joliet volume descriptor is present) into
 // destDir, preserving directory structure.
