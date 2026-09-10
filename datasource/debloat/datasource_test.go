@@ -47,8 +47,7 @@ func configVal(overrides map[string]cty.Value) cty.Value {
 func TestConfigureDefaultsMatchNano11GoCLI(t *testing.T) {
 	d := &Datasource{}
 	err := d.Configure(configVal(map[string]cty.Value{
-		"iso_path":        cty.StringVal("/tmp/whatever.iso"),
-		"nano11go_binary": cty.StringVal("go"), // just needs to resolve via exec.LookPath
+		"iso_path": cty.StringVal("/tmp/whatever.iso"),
 	}))
 	if err != nil {
 		t.Fatalf("Configure: %v", err)
@@ -72,9 +71,7 @@ func TestConfigureDefaultsMatchNano11GoCLI(t *testing.T) {
 
 func TestConfigureRequiresIsoPath(t *testing.T) {
 	d := &Datasource{}
-	err := d.Configure(configVal(map[string]cty.Value{
-		"nano11go_binary": cty.StringVal("go"),
-	}))
+	err := d.Configure(configVal(map[string]cty.Value{}))
 	if err == nil || !strings.Contains(err.Error(), "iso_path is required") {
 		t.Fatalf("expected iso_path required error, got %v", err)
 	}
@@ -84,7 +81,6 @@ func TestConfigureMapsBoolFlags(t *testing.T) {
 	d := &Datasource{}
 	err := d.Configure(configVal(map[string]cty.Value{
 		"iso_path":              cty.StringVal("/tmp/whatever.iso"),
-		"nano11go_binary":       cty.StringVal("go"),
 		"skip_appx":             cty.BoolVal(true),
 		"keep_nic_drivers":      cty.BoolVal(true),
 		"remove_uwp_frameworks": cty.BoolVal(true),
@@ -104,31 +100,29 @@ func TestConfigureMapsBoolFlags(t *testing.T) {
 func TestConfigureRejectsInvalidImageIndex(t *testing.T) {
 	d := &Datasource{}
 	err := d.Configure(configVal(map[string]cty.Value{
-		"iso_path":        cty.StringVal("/tmp/whatever.iso"),
-		"nano11go_binary": cty.StringVal("go"),
-		"image_index":     cty.NumberIntVal(0),
+		"iso_path":    cty.StringVal("/tmp/whatever.iso"),
+		"image_index": cty.NumberIntVal(0),
 	}))
 	if err == nil || !strings.Contains(err.Error(), "image_index") {
 		t.Fatalf("expected image_index validation error, got %v", err)
 	}
 }
 
-func TestConfigureRejectsMissingBinary(t *testing.T) {
+func TestConfigureRejectsInvalidLZXPreset(t *testing.T) {
 	d := &Datasource{}
 	err := d.Configure(configVal(map[string]cty.Value{
-		"iso_path":        cty.StringVal("/tmp/whatever.iso"),
-		"nano11go_binary": cty.StringVal("nano11-go-definitely-not-on-path-xyz"),
+		"iso_path":   cty.StringVal("/tmp/whatever.iso"),
+		"lzx_preset": cty.StringVal("ludicrous-speed"),
 	}))
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("expected binary-not-found error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid lzx_preset") {
+		t.Fatalf("expected invalid lzx_preset error, got %v", err)
 	}
 }
 
 func TestConfigureParsesRegistryTweaks(t *testing.T) {
 	d := &Datasource{}
 	err := d.Configure(configVal(map[string]cty.Value{
-		"iso_path":        cty.StringVal("/tmp/whatever.iso"),
-		"nano11go_binary": cty.StringVal("go"),
+		"iso_path": cty.StringVal("/tmp/whatever.iso"),
 		"registry_tweaks": cty.ListVal([]cty.Value{
 			tweakVal("SOFTWARE", `Microsoft\Windows\CurrentVersion\Policies\System`, "LocalAccountTokenFilterPolicy", "dword", "1"),
 			tweakVal("SOFTWARE", `Some\Path`, "SomeString", "string", "hello"),
@@ -165,7 +159,6 @@ func TestConfigureRejectsBadRegistryTweaks(t *testing.T) {
 			d := &Datasource{}
 			err := d.Configure(configVal(map[string]cty.Value{
 				"iso_path":        cty.StringVal("/tmp/whatever.iso"),
-				"nano11go_binary": cty.StringVal("go"),
 				"registry_tweaks": cty.ListVal([]cty.Value{c.tweak}),
 			}))
 			if err == nil || !strings.Contains(err.Error(), c.want) {

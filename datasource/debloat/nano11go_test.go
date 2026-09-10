@@ -1,25 +1,27 @@
 package debloat
 
 import (
-	"reflect"
+	"strings"
 	"testing"
+
+	nano11go "github.com/Pandapip1/nano11-go"
+
+	"github.com/Pandapip1/gowim/lzx"
 )
 
-func TestDebloatArgsDefaults(t *testing.T) {
+func TestDebloatOptionsDefaults(t *testing.T) {
 	d := &Datasource{imageIndex: 1, lzxPreset: "fast"}
-	got := debloatArgs(d, "in.wim", "out.wim")
-	want := []string{
-		"-wim", "in.wim",
-		"-out", "out.wim",
-		"-image", "1",
-		"-lzx-preset", "fast",
+	got, err := debloatOptions(d)
+	if err != nil {
+		t.Fatalf("debloatOptions: %v", err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("debloatArgs() = %v, want %v", got, want)
+	want := nano11go.DebloatOptions{WinRE: nano11go.WinREDonorStub, LZX: lzx.Fast()}
+	if got != want {
+		t.Fatalf("debloatOptions() = %+v, want %+v", got, want)
 	}
 }
 
-func TestDebloatArgsIncludesSetFlags(t *testing.T) {
+func TestDebloatOptionsMapsSetFlags(t *testing.T) {
 	d := &Datasource{
 		imageIndex: 2,
 		lzxPreset:  "max",
@@ -31,34 +33,63 @@ func TestDebloatArgsIncludesSetFlags(t *testing.T) {
 			removeStoreApps: false,
 		},
 	}
-	got := debloatArgs(d, "in.wim", "out.wim")
-	for _, want := range []string{"-skip-appx", "-keep-nic-drivers", "-remove-ai", "-skip-winsxs-wipe"} {
-		if !contains(got, want) {
-			t.Fatalf("debloatArgs() = %v, missing %q", got, want)
-		}
+	got, err := debloatOptions(d)
+	if err != nil {
+		t.Fatalf("debloatOptions: %v", err)
 	}
-	for _, unwanted := range []string{"-remove-store-apps", "-skip-packages", "-keep-drivers"} {
-		if contains(got, unwanted) {
-			t.Fatalf("debloatArgs() = %v, should not contain %q", got, unwanted)
+	if !got.SkipAppx || !got.KeepNICDrivers || !got.RemoveAI || !got.SkipWinSxSWipe {
+		t.Fatalf("debloatOptions() = %+v, expected those four fields true", got)
+	}
+	if got.RemoveStoreApps || got.SkipPackages || got.KeepDrivers {
+		t.Fatalf("debloatOptions() = %+v, expected those three fields false", got)
+	}
+	if got.WinRE != nano11go.WinREDonorStub {
+		t.Fatalf("debloatOptions() WinRE = %v, want WinREDonorStub (nano11-go CLI's own default)", got.WinRE)
+	}
+}
+
+func TestDebloatOptionsKeepDriversImpliesKeepNICDrivers(t *testing.T) {
+	d := &Datasource{lzxPreset: "fast", flags: nano11Flags{keepDrivers: true}}
+	got, err := debloatOptions(d)
+	if err != nil {
+		t.Fatalf("debloatOptions: %v", err)
+	}
+	if !got.KeepDrivers || !got.KeepNICDrivers {
+		t.Fatalf("debloatOptions() = %+v, expected KeepDrivers and KeepNICDrivers both true (matches nano11-go CLI's own implication)", got)
+	}
+}
+
+func TestDebloatOptionsRejectsInvalidLZXPreset(t *testing.T) {
+	d := &Datasource{lzxPreset: "ludicrous-speed"}
+	_, err := debloatOptions(d)
+	if err == nil || !strings.Contains(err.Error(), "invalid lzx_preset") {
+		t.Fatalf("expected invalid lzx_preset error, got %v", err)
+	}
+}
+
+func TestLZXPresetOptionsAcceptsAllPresets(t *testing.T) {
+	for _, name := range []string{"fast", "balanced", "default", "max", "none"} {
+		if _, err := lzxPresetOptions(name); err != nil {
+			t.Fatalf("lzxPresetOptions(%q): %v", name, err)
 		}
 	}
 }
 
-func TestAuthorISOArgs(t *testing.T) {
+func TestISOOptions(t *testing.T) {
 	d := &Datasource{isoVolumeID: "MyVol"}
-	got := authorISOArgs(d, "/media", "/tmp/install.wim", "/tmp/out.iso")
-	want := []string{
-		"-iso-dir", "/media",
-		"-iso-out", "/tmp/out.iso",
-		"-iso-install-wim", "/tmp/install.wim",
-		"-iso-volid", "MyVol",
+	got := isoOptions(d, "/media", "/tmp/install.wim", "/tmp/out.iso")
+	want := nano11go.ISOOptions{
+		Dir:        "/media",
+		Out:        "/tmp/out.iso",
+		VolID:      "MyVol",
+		InstallWim: "/tmp/install.wim",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("authorISOArgs() = %v, want %v", got, want)
+	if got != want {
+		t.Fatalf("isoOptions() = %+v, want %+v", got, want)
 	}
 }
 
-func TestAuthorISOArgsWithOptions(t *testing.T) {
+func TestISOOptionsWithFlags(t *testing.T) {
 	d := &Datasource{
 		isoVolumeID: "MyVol",
 		flags: nano11Flags{
@@ -66,19 +97,8 @@ func TestAuthorISOArgsWithOptions(t *testing.T) {
 			skipISOAutounattend: true,
 		},
 	}
-	got := authorISOArgs(d, "/media", "/tmp/install.wim", "/tmp/out.iso")
-	for _, want := range []string{"-keep-iso-extras", "-skip-iso-autounattend"} {
-		if !contains(got, want) {
-			t.Fatalf("authorISOArgs() = %v, missing %q", got, want)
-		}
+	got := isoOptions(d, "/media", "/tmp/install.wim", "/tmp/out.iso")
+	if !got.KeepExtras || !got.SkipAutounattend {
+		t.Fatalf("isoOptions() = %+v, expected KeepExtras and SkipAutounattend both true", got)
 	}
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
