@@ -48,14 +48,12 @@ servicing-package/WinSxS/file-cleanup/registry-tweak/service removal against
 rights) -- and authors a new bootable ISO from the result. It optionally
 bakes in caller-supplied registry tweaks before the ISO is authored.
 
-This datasource shells out to a `nano11-go` binary for the actual debloat and
-ISO-authoring work (nano11-go's removal logic lives entirely in its own
-`package main`, so it is not importable as a Go library without forking it);
-`nano11-go` must be built and either on `PATH` or pointed to via
-`nano11go_binary`. `registry_tweaks`, however, is applied directly via the
-[gowim](https://github.com/Pandapip1/gowim) `regf`/`registry` Go packages --
-no subprocess, no nano11-go involvement -- since that step is cleanly
-separable library code.
+This datasource calls directly into the
+[nano11-go](https://github.com/Pandapip1/nano11-go) Go library for the actual
+debloat and ISO-authoring work -- no subprocess, no separately-built
+`nano11-go` binary required. `registry_tweaks` is likewise applied directly
+via the [gowim](https://github.com/Pandapip1/gowim) `regf`/`registry` Go
+packages, independent of nano11-go's own registry tweak pass.
 
 ```hcl
 data "windows-utils-debloat" "win11" {
@@ -81,10 +79,9 @@ data "windows-utils-debloat" "win11" {
   keep_iso_extras       = false
   skip_iso_autounattend = false
 
-  image_index     = 1       # 1-based edition index within install.wim
-  lzx_preset      = "fast"  # fast | balanced | default | max | none
-  iso_volume_id   = "Nano11Go"
-  nano11go_binary = "nano11-go" # path to the built nano11-go binary
+  image_index   = 1       # 1-based edition index within install.wim
+  lzx_preset    = "fast"  # fast | balanced | default | max | none
+  iso_volume_id = "Nano11Go"
 
   # Baked in offline via gowim's regf/registry packages, before the ISO is
   # authored -- e.g. this is exactly how you'd pre-bake
