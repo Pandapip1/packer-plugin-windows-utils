@@ -10,6 +10,13 @@ require (
 )
 
 require (
+	github.com/Pandapip1/gowim/lzms v0.0.0 // indirect
+	github.com/Pandapip1/gowim/lzx v0.0.0
+	github.com/Pandapip1/gowim/regf v0.0.0
+	github.com/Pandapip1/gowim/registry v0.0.0
+	github.com/Pandapip1/gowim/service v0.0.0 // indirect
+	github.com/Pandapip1/gowim/wim v0.0.0
+	github.com/Pandapip1/gowim/xpress v0.0.0 // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
 	github.com/apparentlymart/go-textseg/v13 v13.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
@@ -78,3 +85,17 @@ require (
 )
 
 replace github.com/zclconf/go-cty => github.com/nywilken/go-cty v1.13.3 // added by packer-sdc fix as noted in github.com/hashicorp/packer-plugin-sdk/issues/187
+
+replace github.com/Pandapip1/gowim/regf => ../gowim/regf
+
+replace github.com/Pandapip1/gowim/registry => ../gowim/registry
+
+replace github.com/Pandapip1/gowim/wim => ../gowim/wim
+
+replace github.com/Pandapip1/gowim/lzx => ../gowim/lzx
+
+replace github.com/Pandapip1/gowim/service => ../gowim/service
+
+replace github.com/Pandapip1/gowim/lzms => ../gowim/lzms
+
+replace github.com/Pandapip1/gowim/xpress => ../gowim/xpress
