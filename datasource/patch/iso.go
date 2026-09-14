@@ -268,18 +268,22 @@ func (s *udfState) walk(lbn uint32, parts []string) *fileExtent {
 	return nil
 }
 
-// udfFindFile returns the extent for path in the UDF filesystem, or nil.
-func udfFindFile(f *os.File, path string) *fileExtent {
+// udfLocateRoot parses the Anchor Volume Descriptor Pointer / Volume
+// Descriptor Sequence / File Set Descriptor chain shared by udfFindFile and
+// udfExtractAll, returning the partition start LBA and the root directory's
+// LBN (both relative-addressing units used throughout udfState), or ok=false
+// if f isn't UDF-formatted (or its structures can't be parsed).
+func udfLocateRoot(f *os.File) (partitionStart, rootLBN uint32, ok bool) {
 	avdp := make([]byte, scanStep)
 	if _, err := f.ReadAt(avdp, 256*scanStep); err != nil {
-		return nil
+		return 0, 0, false
 	}
 	if binary.LittleEndian.Uint16(avdp[0:]) != 2 {
-		return nil
+		return 0, 0, false
 	}
 	mainVDSLBA := binary.LittleEndian.Uint32(avdp[20:])
 
-	var partitionStart, fsdLBN *uint32
+	var partitionStartPtr, fsdLBNPtr *uint32
 	lba := mainVDSLBA
 	for i := 0; i < 32; i++ {
 		vd := make([]byte, scanStep)
@@ -292,26 +296,34 @@ func udfFindFile(f *os.File, path string) *fileExtent {
 		}
 		if tag == 5 {
 			v := binary.LittleEndian.Uint32(vd[188:])
-			partitionStart = &v
+			partitionStartPtr = &v
 		} else if tag == 6 {
 			v := binary.LittleEndian.Uint32(vd[252:])
-			fsdLBN = &v
+			fsdLBNPtr = &v
 		}
 		lba++
 	}
 
-	if partitionStart == nil || fsdLBN == nil {
-		return nil
+	if partitionStartPtr == nil || fsdLBNPtr == nil {
+		return 0, 0, false
 	}
 
 	fsd := make([]byte, scanStep)
-	if _, err := f.ReadAt(fsd, int64(*partitionStart+*fsdLBN)*scanStep); err != nil {
-		return nil
+	if _, err := f.ReadAt(fsd, int64(*partitionStartPtr+*fsdLBNPtr)*scanStep); err != nil {
+		return 0, 0, false
 	}
 	if binary.LittleEndian.Uint16(fsd[0:]) != 256 {
+		return 0, 0, false
+	}
+	return *partitionStartPtr, binary.LittleEndian.Uint32(fsd[404:]), true
+}
+
+// udfFindFile returns the extent for path in the UDF filesystem, or nil.
+func udfFindFile(f *os.File, path string) *fileExtent {
+	partitionStart, rootLBN, ok := udfLocateRoot(f)
+	if !ok {
 		return nil
 	}
-	rootLBN := binary.LittleEndian.Uint32(fsd[404:])
 
 	var parts []string
 	for _, p := range strings.Split(path, "/") {
@@ -320,9 +332,129 @@ func udfFindFile(f *os.File, path string) *fileExtent {
 		}
 	}
 
-	state := &udfState{f: f, partitionStart: *partitionStart}
+	state := &udfState{f: f, partitionStart: partitionStart}
 	defer func() { recover() }() //nolint:errcheck — ignore malformed UDF structures
 	return state.walk(rootLBN, parts)
+}
+
+// udfExtractAll recursively extracts every file under the UDF filesystem's
+// root directory into destDir, or returns ok=false if f isn't UDF-formatted.
+//
+// This exists because large (dual-layer-sized, confirmed on real Windows 11
+// installation media that exceeds the ~4.7GB practical ISO 9660/Joliet
+// limit) ISOs are authored as UDF, and the bulk of their file tree lives
+// only in the UDF partition, NOT in the Joliet/ISO 9660 compatibility tree
+// isoExtractAll otherwise reads (that compatibility tree, when present at
+// all, holds only a handful of legacy files like a top-level README.TXT) -
+// confirmed on a live builder: isoExtractAll against real stock media
+// extracted a single file and silently reported success, since it never
+// even attempted UDF and its ISO 9660/Joliet fallback found that
+// compatibility tree instead of erroring outright.
+func udfExtractAll(srcPath, destDir string) (ok bool, err error) {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	partitionStart, rootLBN, found := udfLocateRoot(f)
+	if !found {
+		return false, nil
+	}
+
+	state := &udfState{f: f, partitionStart: partitionStart}
+	return true, state.extractAll(rootLBN, destDir)
+}
+
+// extractAll recursively extracts every file under the directory at lbn into
+// destDir. Mirrors walk's directory-entry parsing, but visits every entry
+// instead of matching against a single target path component.
+func (s *udfState) extractAll(lbn uint32, destDir string) error {
+	fe := make([]byte, scanStep)
+	if _, err := s.f.ReadAt(fe, int64(s.partitionStart+lbn)*scanStep); err != nil {
+		return fmt.Errorf("reading directory file entry at LBN %d: %w", lbn, err)
+	}
+	tag := binary.LittleEndian.Uint16(fe[0:])
+	if tag != 260 && tag != 261 {
+		return fmt.Errorf("unexpected UDF file entry tag %d at LBN %d (want 260 or 261)", tag, lbn)
+	}
+	dirData := s.readDirData(fe)
+	pos := 0
+	for pos+40 <= len(dirData) {
+		if binary.LittleEndian.Uint16(dirData[pos:]) != 257 {
+			break
+		}
+		fileChars := dirData[pos+18]
+		lFI := int(dirData[pos+19])
+		icbLBN := binary.LittleEndian.Uint32(dirData[pos+24:])
+		lIU := int(binary.LittleEndian.Uint16(dirData[pos+36:]))
+		fiStart := pos + 38 + lIU
+		fidLen := (38 + lIU + lFI + 3) &^ 3
+		if fidLen == 0 {
+			break
+		}
+
+		// Parent/self entries have no file identifier (lFI == 0) - skip
+		// them rather than trying to recurse into "." or "..". Hidden
+		// entries (FileCharacteristics bit 0x01, "Existence") are skipped
+		// too - confirmed on real Windows 11 media, a hidden root-level
+		// entry there holds a plain-text build-manifest artifact
+		// ("directory_listing: ..." lines referencing the image builder's
+		// own internal paths) that every normal UDF consumer hides and
+		// that has no place in a repacked ISO.
+		if lFI > 0 && fiStart+lFI <= len(dirData) && fileChars&0x01 == 0 {
+			comp := dirData[fiStart]
+			raw := dirData[fiStart+1 : fiStart+lFI]
+			var name string
+			if comp == 16 {
+				name = utf16BEDecode(raw)
+			} else {
+				name = string(raw)
+			}
+			if name != "" {
+				outPath := filepath.Join(destDir, name)
+				if fileChars&0x02 != 0 {
+					if err := os.MkdirAll(outPath, 0o755); err != nil {
+						return err
+					}
+					if err := s.extractAll(icbLBN, outPath); err != nil {
+						return fmt.Errorf("%s: %w", outPath, err)
+					}
+				} else {
+					fileFE := make([]byte, scanStep)
+					if _, err := s.f.ReadAt(fileFE, int64(s.partitionStart+icbLBN)*scanStep); err != nil {
+						return fmt.Errorf("reading file entry for %s: %w", outPath, err)
+					}
+					extent := s.fileExtent(fileFE)
+					if extent == nil {
+						return fmt.Errorf("could not resolve extent for %s", outPath)
+					}
+					if err := udfExtractFile(s.f, extent.lba, extent.size, outPath); err != nil {
+						return fmt.Errorf("%s: %w", outPath, err)
+					}
+				}
+			}
+		}
+		pos += fidLen
+	}
+	return nil
+}
+
+// udfExtractFile is isoExtractFile's UDF counterpart, taking a uint64 size
+// (rather than isoExtractFile's uint32) since UDF's InformationLength field
+// is 64-bit and a multi-edition install.wim can plausibly exceed 4GB even
+// LZX-compressed.
+func udfExtractFile(f *os.File, lba uint32, size uint64, outPath string) error {
+	out, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if size == 0 {
+		return nil
+	}
+	_, err = io.CopyN(out, io.NewSectionReader(f, int64(lba)*scanStep, int64(size)), int64(size))
+	return err
 }
 
 // isoWalkDir walks an ISO 9660 / Joliet directory tree looking for parts.
@@ -439,10 +571,16 @@ func ExtractISO(srcPath, destDir string) error {
 	return isoExtractAll(srcPath, destDir)
 }
 
-// isoExtractAll extracts every file from the ISO's Joliet tree (falling back
-// to the plain ISO 9660 tree if no Joliet volume descriptor is present) into
-// destDir, preserving directory structure.
+// isoExtractAll extracts every file from srcPath into destDir, preserving
+// directory structure. It tries UDF first (see udfExtractAll's doc comment:
+// large real-world Windows installation media is authored as UDF, whose
+// bulk file tree isn't reachable through the ISO 9660/Joliet tree at all),
+// falling back to the Joliet tree and then the plain ISO 9660 tree.
 func isoExtractAll(srcPath, destDir string) error {
+	if ok, err := udfExtractAll(srcPath, destDir); ok {
+		return err
+	}
+
 	f, err := os.Open(srcPath)
 	if err != nil {
 		return err
@@ -456,7 +594,7 @@ func isoExtractAll(srcPath, destDir string) error {
 	if primaryRoot != nil {
 		return isoExtractDir(f, primaryRoot.lba, primaryRoot.size, false, destDir)
 	}
-	return fmt.Errorf("no ISO 9660 root directory found")
+	return fmt.Errorf("no UDF, ISO 9660, or Joliet root directory found")
 }
 
 // isoExtractDir recursively extracts the directory at dirLBA into destDir.
@@ -570,9 +708,9 @@ func copyFileContents(src, dst string) error {
 // extract/modify/repack pipeline (see patchISORebuild), since injected
 // drivers change the size of boot.wim/install.wim beyond what fits back into
 // the ISO's original fixed sector layout.
-func patchISO(srcPath string, patchNoBoot bool, extraDrivers []string) (string, error) {
-	if len(extraDrivers) > 0 {
-		return patchISORebuild(srcPath, patchNoBoot, extraDrivers)
+func patchISO(srcPath string, patchNoBoot bool, extraDrivers []string, registryTweaks []RegistryTweak, imageIndex int, enableSSH bool) (string, error) {
+	if len(extraDrivers) > 0 || len(registryTweaks) > 0 || enableSSH {
+		return patchISORebuild(srcPath, patchNoBoot, extraDrivers, registryTweaks, imageIndex, enableSSH)
 	}
 
 	dstFile, err := os.CreateTemp("", "patched-*.iso")

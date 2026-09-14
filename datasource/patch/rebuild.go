@@ -5,17 +5,19 @@ import (
 	"io/fs"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
+
+	"github.com/Pandapip1/gowim/iso"
 )
 
 // patchISORebuild extracts srcPath's contents to a working directory,
 // optionally patches the no-prompt EFI boot images in place there, injects
-// extraDrivers into a "$WinPeDriver$" folder, and repacks the result into a
-// new bootable ISO. It returns the path to the new ISO.
-func patchISORebuild(srcPath string, patchNoBoot bool, extraDrivers []string) (string, error) {
+// extraDrivers into a "$WinPeDriver$" folder, optionally applies
+// registryTweaks against sources/install.wim's imageIndex'th image (offline,
+// via applyRegistryTweaksToWim -- see regtweaks.go), and repacks the result
+// into a new bootable ISO. It returns the path to the new ISO.
+func patchISORebuild(srcPath string, patchNoBoot bool, extraDrivers []string, registryTweaks []RegistryTweak, imageIndex int, enableSSH bool) (string, error) {
 	mediaDir, err := os.MkdirTemp("", "patch-media-*")
 	if err != nil {
 		return "", fmt.Errorf("creating media directory: %w", err)
@@ -36,6 +38,28 @@ func patchISORebuild(srcPath string, patchNoBoot bool, extraDrivers []string) (s
 	log.Printf("  Injecting %d driver(s) into $WinPeDriver$ ...", len(extraDrivers))
 	if err := injectDrivers(mediaDir, extraDrivers); err != nil {
 		return "", err
+	}
+
+	if enableSSH {
+		installWimPath, err := findByBasename(mediaDir, "install.wim")
+		if err != nil {
+			return "", fmt.Errorf("locating install.wim for enable_ssh: %w", err)
+		}
+		log.Printf("  Installing OpenSSH.Server offline into install.wim image %d ...", imageIndex)
+		if err := installOpenSSHToWim(installWimPath, imageIndex); err != nil {
+			return "", fmt.Errorf("enabling ssh: %w", err)
+		}
+	}
+
+	if len(registryTweaks) > 0 {
+		installWimPath, err := findByBasename(mediaDir, "install.wim")
+		if err != nil {
+			return "", fmt.Errorf("locating install.wim for registry_tweaks: %w", err)
+		}
+		log.Printf("  Applying %d registry tweak(s) to install.wim image %d ...", len(registryTweaks), imageIndex)
+		if err := applyRegistryTweaksToWim(installWimPath, imageIndex, registryTweaks); err != nil {
+			return "", fmt.Errorf("applying registry tweaks: %w", err)
+		}
 	}
 
 	dstFile, err := os.CreateTemp("", "patched-*.iso")
@@ -115,7 +139,19 @@ func findByBasename(root, name string) (string, error) {
 
 // repackISO builds a new bootable ISO from mediaDir, preserving the BIOS
 // (etfsboot.com) and UEFI (efisys.bin) El Torito boot entries found in the
-// extracted media.
+// extracted media. It uses gowim/iso, a pure-Go ISO 9660/UDF/El Torito/Joliet
+// writer, so no external ISO authoring tool (xorriso, oscdimg) is invoked.
+//
+// UDF (with large files recorded in UDF only) is used rather than plain
+// ISO 9660 multi-extent, matching what real Windows installation media
+// actually is: confirmed via `7z l` against a real Windows 11 ISO reporting
+// `Type = Udf`. See iso.Options.LargeFilesUDFOnly's doc comment for why the
+// ECMA-119 multi-extent alternative is left unused here.
+//
+// HybridMBR is also enabled: it costs nothing extra (no external assets
+// needed, since the UEFI El Torito entry is already being written) and makes
+// the resulting ISO also dd-able to a USB stick for BIOS+UEFI hybrid boot, a
+// zero-cost superset of the old xorriso/oscdimg invocations' behavior.
 func repackISO(mediaDir, dstPath string) error {
 	etfsboot, err := findByBasename(mediaDir, "etfsboot.com")
 	if err != nil {
@@ -134,47 +170,37 @@ func repackISO(mediaDir, dstPath string) error {
 		return err
 	}
 
-	if runtime.GOOS == "windows" {
-		return repackWithOscdimg(mediaDir, etfsbootRel, efisysRel, dstPath)
+	b := iso.New(&iso.Options{
+		Level:             iso.Level3,
+		Joliet:            true,
+		UDF:               true,
+		LargeFilesUDFOnly: true,
+		BootCatalogPath:   "boot/boot.cat",
+		HybridMBR:         true,
+		BootEntries: []iso.BootEntry{
+			{
+				ImagePath:     filepath.ToSlash(etfsbootRel),
+				Platform:      iso.BootPlatformX86,
+				LoadSectors:   8,
+				BootInfoTable: true,
+			},
+			{
+				ImagePath: filepath.ToSlash(efisysRel),
+				Platform:  iso.BootPlatformUEFI,
+			},
+		},
+	})
+	if err := b.AddTree("", mediaDir); err != nil {
+		return fmt.Errorf("adding media tree: %w", err)
 	}
-	return repackWithXorriso(mediaDir, etfsbootRel, efisysRel, dstPath)
-}
 
-// repackWithXorriso rebuilds the ISO using xorriso, per
-// https://forum.proxmox.com/threads/how-to-inject-vioscsi-driver-into-windows-install-win-boot-win-using-linux-tools-only.161239/
-func repackWithXorriso(mediaDir, etfsbootRel, efisysRel, dstPath string) error {
-	cmd := exec.Command("xorriso",
-		"-as", "mkisofs",
-		"-iso-level", "3",
-		"-full-iso9660-filenames",
-		"-joliet", "-joliet-long",
-		"-eltorito-boot", filepath.ToSlash(etfsbootRel),
-		"-no-emul-boot", "-boot-load-size", "8", "-boot-info-table",
-		"-eltorito-catalog", "boot/boot.cat",
-		"-eltorito-alt-boot",
-		"-e", filepath.ToSlash(efisysRel), "-no-emul-boot",
-		"-o", dstPath,
-		mediaDir,
-	)
-	out, err := cmd.CombinedOutput()
+	out, err := os.Create(dstPath)
 	if err != nil {
-		return fmt.Errorf("xorriso failed: %w\n%s", err, out)
+		return err
 	}
-	return nil
-}
-
-// repackWithOscdimg rebuilds the ISO using oscdimg (Windows ADK), per
-// https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/oscdimg-command-line-options
-func repackWithOscdimg(mediaDir, etfsbootRel, efisysRel, dstPath string) error {
-	bootdata := fmt.Sprintf("2#p0,e,b%s#pEF,e,b%s", filepath.FromSlash(etfsbootRel), filepath.FromSlash(efisysRel))
-	cmd := exec.Command("oscdimg",
-		"-bootdata:"+bootdata,
-		"-u1", "-udfver102",
-		mediaDir, dstPath,
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("oscdimg failed: %w\n%s", err, out)
+	defer out.Close()
+	if _, err := b.WriteTo(out); err != nil {
+		return fmt.Errorf("writing ISO: %w", err)
 	}
 	return nil
 }
