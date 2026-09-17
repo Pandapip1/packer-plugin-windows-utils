@@ -154,6 +154,7 @@ func debloatOptions(d *Datasource) (nano11go.DebloatOptions, error) {
 		RemoveIME:           f.removeIME,
 		RemoveAI:            f.removeAI,
 		LZX:                 lzxOpts,
+		NoCompression:       f.noCompression,
 	}, nil
 }
 

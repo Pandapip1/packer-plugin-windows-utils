@@ -82,6 +82,7 @@ type nano11Flags struct {
 	removeIME           bool
 	keepISOExtras       bool
 	skipISOAutounattend bool
+	noCompression       bool
 }
 
 type Datasource struct {
@@ -117,6 +118,15 @@ func (d *Datasource) ConfigSpec() hcldec.ObjectSpec {
 		"remove_ime":            &hcldec.AttrSpec{Name: "remove_ime", Type: cty.Bool, Required: false},
 		"keep_iso_extras":       &hcldec.AttrSpec{Name: "keep_iso_extras", Type: cty.Bool, Required: false},
 		"skip_iso_autounattend": &hcldec.AttrSpec{Name: "skip_iso_autounattend", Type: cty.Bool, Required: false},
+		// Skips LZX entirely (wim.CompressionNone) for every WIM this pass
+		// writes, regardless of lzx_preset - even lzx_preset's own "none"
+		// value still means real (if minimal-effort) LZX encoding, not
+		// skipping compression outright. Confirmed on a live builder:
+		// LZX-recompressing a multi-GB install.wim took well over two
+		// hours of CPU time versus a few seconds uncompressed, for what is
+		// typically a throwaway, single-boot Packer build artifact with
+		// nothing to gain from spending that time.
+		"no_compression": &hcldec.AttrSpec{Name: "no_compression", Type: cty.Bool, Required: false},
 
 		"registry_tweaks": &hcldec.AttrSpec{Name: "registry_tweaks", Type: cty.List(registryTweakType), Required: false},
 	}
@@ -155,6 +165,7 @@ func (d *Datasource) Configure(configs ...interface{}) error {
 		"remove_ime":            &d.flags.removeIME,
 		"keep_iso_extras":       &d.flags.keepISOExtras,
 		"skip_iso_autounattend": &d.flags.skipISOAutounattend,
+		"no_compression":        &d.flags.noCompression,
 	}
 	stringFields := map[string]*string{
 		"lzx_preset":    &d.lzxPreset,
